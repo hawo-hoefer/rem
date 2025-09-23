@@ -1,4 +1,4 @@
-use chrono::{Local, NaiveDate, NaiveTime};
+use chrono::{Days, Local, Month, NaiveDate, NaiveTime, TimeDelta};
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use rusqlite::types::Null;
@@ -10,13 +10,15 @@ const DATETIME_FMT: &'static str = "%d.%m.%Y %H:%M";
 
 #[derive(Clone, PartialEq, Eq, Debug, Subcommand)]
 enum Action {
+    #[command(about = "display tasks")]
     Show {
-        #[arg(short, long)]
+        #[arg(short, long, help = "show all tasks, including completed ones")]
         all: bool,
 
-        #[arg(short, long)]
+        #[arg(short, long, help = "show all information on the tasks")]
         verbose: bool,
     },
+    #[command(about = "create a task")]
     Task {
         #[arg(help = "task title")]
         title: String,
@@ -25,11 +27,30 @@ enum Action {
         #[arg(short, long, help = "optional due date/time as DD.MM.YYYY [HH:MM]")]
         due: Option<String>,
     },
-    DeleteTask {
-        id: u64,
+    #[command(about = "delete a task")]
+    DeleteTask { id: u64 },
+    #[command(about = "mark a task as completed")]
+    Complete { id: u64 },
+    #[command(about = "add a generator for recurring events")]
+    Recurring {
+        #[arg(help = "title")]
+        title: String,
+        #[arg(help = "first due date")]
+        first_due: String,
+        #[arg(help = "recurrence period")]
+        period: String,
+        #[arg(long, short, help = "optional description")]
+        description: Option<String>,
+        #[arg(long, short, help = "last occurrence is before this datetime")]
+        until: Option<String>,
     },
-    Complete {
-        id: u64,
+    #[command(about = "display reminders")]
+    Reminders {
+        #[arg(short, long, help = "show all reminders, including inactive ones")]
+        all: bool,
+
+        #[arg(short, long, help = "show all information on the reminders")]
+        verbose: bool,
     },
 }
 
@@ -50,16 +71,33 @@ impl App {
                 .execute(
                     "CREATE TABLE IF NOT EXISTS tasks (
                       id INTEGER PRIMARY KEY,
-                      title TEXT,
+                      title TEXT NOT NULL,
                       description TEXT,
-                      created INTEGER,
+                      created INTEGER NOT NULL,
                       due INTEGER,
                       generated_by INTEGER,
                       completed INTEGER
                     );",
                     [],
                 )
-                .map_err(|err| format!("could not create table: {err}"))?;
+                .map_err(|err| format!("could not create tasks table: {err}"))?;
+        }
+
+        if !conn.table_exists(Some(DATABASE_NAME), "reminders").unwrap() {
+            let _ = conn
+                .execute(
+                    "CREATE TABLE IF NOT EXISTS reminders (
+                      id INTEGER PRIMARY KEY,
+                      title TEXT NOT NULL,
+                      description TEXT,
+                      created INTEGER NOT NULL,
+                      first_due INTEGER NOT NULL,
+                      period INTEGER NOT NULL,
+                      until INTEGER
+                    );",
+                    [],
+                )
+                .map_err(|err| format!("could not create reminders table: {err}"))?;
         }
 
         Ok(Self { conn })
@@ -82,6 +120,108 @@ impl App {
                 Null
             ),
         ).map_err(|err| { format!("could not insert task: {err}") })?;
+        Ok(())
+    }
+
+    fn reminders_to_tasks(&mut self) {
+        todo!()
+    }
+
+    fn add_reminder(
+        &mut self,
+        title: String,
+        description: Option<String>,
+        first_due: LocalDT,
+        period: TimeDelta,
+        until: Option<LocalDT>,
+    ) -> Result<(), String> {
+        let until = until.map(|x| x.timestamp());
+        let now = Local::now();
+        self.conn.execute(
+            "INSERT INTO reminders (title, description, first_due, period, until, created) values (?1, ?2, ?3, ?4, ?5, ?6);",
+            (title, description, first_due.timestamp(), period.num_seconds(), until, now.timestamp())
+        ).map_err(|err| format!("Could not add reminder: {err}"))?;
+
+        Ok(())
+    }
+
+    fn show_reminders(&self, all: bool, verbose: bool) -> Result<(), String> {
+        let mut res = self
+            .conn
+            .prepare(
+                "SELECT id, title, description, created, first_due, period, until FROM reminders;",
+            )
+            .map_err(|err| format!("could not query tasks: {err}"))?;
+
+        let rows = res
+            .query_map([], |row| {
+                let id: u64 = row.get("id")?;
+                let title: String = row.get("title")?;
+                let description: Option<String> = row.get("description")?;
+
+                let created = Self::import_datetime(row.get("created")?);
+                let first_due = Self::import_datetime(row.get::<_, i64>("first_due")?);
+                let period =
+                    TimeDelta::new(row.get::<_, i64>("period")?, 0).expect("duration is in bounds");
+
+                let until = row
+                    .get::<_, Option<i64>>("until")?
+                    .map(Self::import_datetime);
+
+                Ok((id, title, description, created, first_due, period, until))
+            })
+            .map_err(|err| format!("Could not query database: {err}"))?;
+
+        let now = chrono::Local::now();
+
+        for row in rows {
+            let (id, title, description, created, first_due, period, until) = match row {
+                Ok(row) => row,
+                Err(err) => return Err(format!("Error querying database: {err}")),
+            };
+
+            let active = until.map(|until| now < until).unwrap_or(true);
+
+            if !all && !active {
+                continue;
+            }
+
+            let marker = if !active { "x" } else { " " };
+            let mut heading = format!("- [{marker}] ({id}) {title}").bold();
+            if !verbose {
+                if !active {
+                    heading = heading.green();
+                }
+            }
+            println!("{heading}");
+            println!("  created:   {}", created.format(DATETIME_FMT));
+            println!("  first due: {}", first_due.format(DATETIME_FMT));
+            if let Some(until) = until {
+                println!("  until:     {}", until.format(DATETIME_FMT));
+            }
+            let mut next_due = first_due;
+            while next_due < now {
+                next_due += period;
+            }
+            println!("  next due:  {}", next_due.format(DATETIME_FMT));
+
+            if let Some(description) = description {
+                println!("  {description}");
+            }
+        }
+
+        Ok(())
+    }
+
+    fn stop_reminder(&mut self, id: u64) -> Result<(), String> {
+        let until = Local::now();
+        self.conn
+            .execute(
+                "UPDATE reminders SET until = ?1 WHERE id = ?2",
+                (until.timestamp(), id),
+            )
+            .map_err(|err| format!("Could stop reminder: {err}"))?;
+
         Ok(())
     }
 
@@ -112,6 +252,8 @@ impl App {
             })
             .map_err(|err| format!("Could not query database: {err}"))?;
 
+        let now = chrono::Local::now();
+
         for row in rows {
             let (id, title, description, created, due, completed) = match row {
                 Ok(row) => row,
@@ -121,8 +263,6 @@ impl App {
             if !all && completed.is_some() {
                 continue;
             }
-
-            let now = chrono::Local::now();
 
             let marker = if completed.is_some() { "x" } else { " " };
             let mut heading = format!("- [{marker}] ({id}) {title}").bold();
@@ -246,8 +386,69 @@ fn get_database_connection() -> Result<rusqlite::Connection, String> {
         .map_err(|err| format!("Could not open database connection: {err}"))?)
 }
 
-fn parse_date_time(repr: String) -> Result<LocalDT, String> {
-    if let Some((date, time)) = repr.split_once(" ") {
+/// Parse a duration expression with weeks and days
+///
+/// parsing examples:
+/// '1w 2d' => TimeDelta()
+///
+/// * `repr`: timedelta to parse
+fn parse_timedelta(repr: impl AsRef<str>) -> Result<TimeDelta, String> {
+    let mut weeks = None;
+    let mut days = None;
+    for part in repr.as_ref().trim().split(' ') {
+        let bytes = part.as_bytes();
+        let idx = bytes.iter().take_while(|x| x.is_ascii_digit()).count();
+        let (num, desc) = bytes.split_at(idx);
+        if desc.len() > 1 {
+            return Err(format!(
+                "invalid duration specifier '{desc}'. Expected 'w' or 'd'.",
+                desc = std::str::from_utf8(desc).expect("rest of input is utf8")
+            ));
+        }
+        let desc = desc[0];
+
+        let num = std::str::from_utf8(num).expect("used is_ascii_digit to find end of num");
+        let num = num
+            .parse::<i64>()
+            .map_err(|err| format!("Could not parse number from '{num}': {err}"))?;
+
+        match desc as char {
+            'w' => {
+                if let Some(weeks) = weeks {
+                    return Err(format!("Cannot specify weeks twice. Already got {weeks}."));
+                } else {
+                    weeks = Some(num);
+                }
+            }
+            'd' => {
+                if let Some(days) = days {
+                    return Err(format!("Cannot specify days twice. Already got {days}."));
+                } else {
+                    days = Some(num);
+                }
+            }
+            _ => {
+                return Err(format!(
+                    "Invalid duration specifier '{desc}.' Expected 'w' or 'd'."
+                ))
+            }
+        }
+    }
+
+    if weeks.is_none() && days.is_none() {
+        return Err(format!(
+            "Need to specify either number of days or number of weeks."
+        ));
+    }
+
+    let days = days.map(TimeDelta::days).unwrap_or(TimeDelta::days(0));
+    let weeks = weeks.map(TimeDelta::days).unwrap_or(TimeDelta::days(0)) * 7;
+
+    Ok(days + weeks)
+}
+
+fn parse_date_time(repr: impl AsRef<str>) -> Result<LocalDT, String> {
+    if let Some((date, time)) = repr.as_ref().split_once(" ") {
         let date = NaiveDate::parse_from_str(date, "%d.%m.%y")
             .map_err(|err| format!("Could not parse date: {err}"))?;
         let time = NaiveTime::parse_from_str(time, "%H:%M")
@@ -255,7 +456,7 @@ fn parse_date_time(repr: String) -> Result<LocalDT, String> {
         let dt = date.and_time(time).and_local_timezone(Local).unwrap();
         Ok(dt)
     } else {
-        let date = NaiveDate::parse_from_str(&repr, "%d.%m.%Y")
+        let date = NaiveDate::parse_from_str(repr.as_ref(), "%d.%m.%Y")
             .map_err(|err| format!("Could not parse date: {err}"))?;
         let dt = date
             .and_hms_opt(8, 0, 0)
@@ -278,6 +479,8 @@ fn main() {
         eprintln!("ERROR: could not initialize application: {err}");
         std::process::exit(1);
     });
+
+    // app.reminders_to_tasks();
 
     match args.action {
         Action::Show { all, verbose } => {
@@ -312,6 +515,41 @@ fn main() {
             app.complete_task(id).unwrap_or_else(|err| {
                 eprintln!("ERROR: could not delete task: {err}");
                 std::process::exit(1);
+            });
+        }
+        Action::Recurring {
+            title,
+            description,
+            first_due,
+            period,
+            until,
+        } => {
+            let first_due = parse_date_time(first_due).unwrap_or_else(|err| {
+                eprintln!("Could not parse first due date: {}", err);
+                std::process::exit(1);
+            });
+            let until = until.map(|x| {
+                parse_date_time(x).unwrap_or_else(|err| {
+                    eprintln!("Could not parse until time: {}", err);
+                    std::process::exit(1);
+                })
+            });
+
+            let period = parse_timedelta(period).unwrap_or_else(|err| {
+                eprintln!("Could not parse period: {err}");
+                std::process::exit(1);
+            });
+
+            app.add_reminder(title, description, first_due, period, until)
+                .unwrap_or_else(|err| {
+                    eprintln!("Could not add reminder: {err}");
+                    std::process::exit(1);
+                });
+        }
+        Action::Reminders { all, verbose } => {
+            app.show_reminders(all, verbose).unwrap_or_else(|err| {
+                eprintln!("Could not show reminders: {err}");
+                std::process::exit(1)
             });
         }
     }
@@ -363,5 +601,28 @@ mod test {
             .expect("adding task");
 
         app.show_tasks(false, true).unwrap();
+    }
+
+    #[test]
+    fn parse_timedelta_week() {
+        assert_eq!(parse_timedelta("1w"), Ok(TimeDelta::days(7)));
+    }
+
+    #[test]
+    fn parse_timedelta_day() {
+        assert_eq!(parse_timedelta("1d"), Ok(TimeDelta::days(1)));
+    }
+
+    #[test]
+    fn parse_timedelta_fail() {
+        assert!(parse_timedelta("1wf 2d").is_err());
+        assert!(parse_timedelta("1w 1w").is_err());
+        assert!(parse_timedelta("1d 1d").is_err());
+    }
+
+    #[test]
+    fn parse_timedelta_mixed() {
+        assert_eq!(parse_timedelta("1w 2d"), Ok(TimeDelta::days(9)));
+        assert_eq!(parse_timedelta("2w 1d"), Ok(TimeDelta::days(15)));
     }
 }
