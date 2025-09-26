@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 use chrono::{Local, NaiveDate, NaiveTime, TimeDelta};
 use clap::{Parser, Subcommand};
 use rusqlite::fallible_iterator::FallibleIterator;
