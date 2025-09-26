@@ -8,6 +8,8 @@ pub struct Task {
     pub title: String,
     pub description: Option<String>,
 
+    pub generated_by: Option<u64>,
+
     pub created: LocalDT,
     pub due: Option<LocalDT>,
     pub completed: Option<LocalDT>,
@@ -18,6 +20,8 @@ impl Task {
         let id: u64 = row.get("ID")?;
         let title: String = row.get("title")?;
         let description: Option<String> = row.get("description")?;
+
+        let generated_by: Option<u64> = row.get("generated_by")?;
 
         let created = import_datetime(row.get("created")?);
         let due = row.get::<_, Option<i64>>("due")?.map(import_datetime);
@@ -30,6 +34,7 @@ impl Task {
             created,
             due,
             completed,
+            generated_by,
         })
     }
 

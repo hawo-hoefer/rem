@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use chrono::{Local, NaiveDate, NaiveTime, TimeDelta};
 use clap::{Parser, Subcommand};
 use rusqlite::fallible_iterator::FallibleIterator;
@@ -12,7 +14,7 @@ const DATABASE_NAME: &'static str = "main";
 #[derive(Clone, PartialEq, Eq, Debug, Subcommand)]
 enum Action {
     #[command(about = "display tasks")]
-    Show {
+    Tasks {
         #[arg(short, long, help = "show all tasks, including completed ones")]
         all: bool,
 
@@ -33,7 +35,7 @@ enum Action {
     #[command(about = "mark a task as completed")]
     Complete { id: u64 },
     #[command(about = "add a generator for recurring events")]
-    Recurring {
+    Reminder {
         #[arg(help = "title")]
         title: String,
         #[arg(help = "first due date")]
@@ -53,6 +55,8 @@ enum Action {
         #[arg(short, long, help = "show all information on the reminders")]
         verbose: bool,
     },
+    #[command(about = "Stop a reminder from generating new tasks")]
+    Stop { id: u64 },
 }
 
 #[derive(Parser, Debug)]
@@ -63,10 +67,13 @@ struct Args {
 
 struct App {
     conn: rusqlite::Connection,
+    now: LocalDT,
 }
 
 impl App {
     fn try_init(conn: rusqlite::Connection) -> Result<Self, String> {
+        let now = chrono::Local::now();
+
         if !conn.table_exists(Some(DATABASE_NAME), "tasks").unwrap() {
             let _ = conn
                 .execute(
@@ -101,7 +108,7 @@ impl App {
                 .map_err(|err| format!("could not create reminders table: {err}"))?;
         }
 
-        Ok(Self { conn })
+        Ok(Self { conn, now })
     }
 
     fn add_task(
@@ -109,23 +116,90 @@ impl App {
         title: String,
         description: Option<String>,
         due: Option<LocalDT>,
+        generated_by: Option<u64>,
     ) -> Result<(), String> {
-        let created = chrono::Local::now();
         let _ = self.conn.execute(
-            "INSERT INTO tasks (title, description, created, due, completed) VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO tasks (title, description, created, due, completed, generated_by) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             (
                 title.clone(),
                 description.to_owned(),
-                created.timestamp(),
+                self.now.timestamp(),
                 due.map(|t| t.timestamp()),
-                Null
+                Null,
+                generated_by,
             ),
         ).map_err(|err| { format!("could not insert task: {err}") })?;
         Ok(())
     }
 
-    fn reminders_to_tasks(&mut self) {
-        todo!()
+    fn reminders_to_tasks(&mut self) -> Result<(), String> {
+        let reminders = {
+            let mut res = self
+            .conn
+            .prepare(
+                "SELECT id, title, description, created, first_due, period, until FROM reminders where until is NULL or until > ?1;",
+            )
+            .map_err(|err| format!("could not query tasks: {err}"))?;
+
+            let s = res
+                .query([self.now.timestamp()])
+                .map_err(|err| format!("Could not query database: {err}"))?
+                .map(|row| Reminder::from_db_row(row))
+                .collect::<Vec<_>>()
+                .map_err(|err| format!("Could not acquire reminders from database: {err}"))?;
+            drop(res);
+            s
+        };
+
+        for reminder in reminders.iter() {
+            let generated_tasks = {
+                let mut r = self
+                    .conn
+                    .prepare("SELECT * FROM tasks where generated_by == ?1;")
+                    .map_err(|err| format!("could not query tasks: {err}"))?;
+
+                let mut generated_tasks = r
+                    .query([reminder.id])
+                    .map_err(|err| format!("Could not query database: {err}"))?
+                    .map(|row| Task::from_db_row(row))
+                    .collect::<Vec<Task>>()
+                    .map_err(|err| {
+                        format!("Could not find tasks corresponding to reminder: {err}")
+                    })?;
+
+                generated_tasks.sort_by_cached_key(|x| {
+                    x.due
+                        .expect("elements of recurring sequence need to have due date")
+                });
+
+                generated_tasks
+            };
+
+            let mut next_due = reminder.first_due;
+            while next_due < self.now + reminder.period {
+                // insert a new task if the instance at next_due is missing from
+                // the list of tasks associated with this list of generated tasks
+                if generated_tasks
+                    .iter()
+                    .find(|task| {
+                        let due = task.due.expect("Recurring tasks need to have a due date");
+                        due == next_due
+                    })
+                    .is_none()
+                {
+                    self.add_task(
+                        reminder.title.clone(),
+                        reminder.description.to_owned(),
+                        Some(next_due),
+                        Some(reminder.id),
+                    )?;
+                }
+
+                next_due += reminder.period;
+            }
+        }
+
+        Ok(())
     }
 
     fn add_reminder(
@@ -160,21 +234,19 @@ impl App {
             .map(|row| Reminder::from_db_row(row))
             .iterator();
 
-        let now = chrono::Local::now();
-
         for row in rows {
             let r = match row {
                 Ok(row) => row,
                 Err(err) => return Err(format!("Error querying database: {err}")),
             };
-            print!("{}", r.display(all, verbose, now));
+            print!("{}", r.display(all, verbose, self.now));
         }
 
         Ok(())
     }
 
     fn stop_reminder(&mut self, id: u64) -> Result<(), String> {
-        let until = Local::now();
+        let until = self.now;
         self.conn
             .execute(
                 "UPDATE reminders SET until = ?1 WHERE id = ?2",
@@ -188,7 +260,7 @@ impl App {
     fn show_tasks(&self, all: bool, verbose: bool) -> Result<(), String> {
         let mut res = self
             .conn
-            .prepare("SELECT id, title, description, created, due, completed FROM tasks;")
+            .prepare("SELECT * FROM tasks;")
             .map_err(|err| format!("could not query tasks: {err}"))?;
 
         let rows = res
@@ -197,14 +269,12 @@ impl App {
             .map(|row| Task::from_db_row(row))
             .iterator();
 
-        let now = chrono::Local::now();
-
         for row in rows {
             let t = match row {
                 Ok(row) => row,
                 Err(err) => return Err(format!("Error querying database: {err}")),
             };
-            print!("{}", t.display(all, verbose, now));
+            print!("{}", t.display(all, verbose, self.now));
         }
         Ok(())
     }
@@ -351,7 +421,7 @@ fn parse_timedelta(repr: impl AsRef<str>) -> Result<TimeDelta, String> {
 
 fn parse_date_time(repr: impl AsRef<str>) -> Result<LocalDT, String> {
     if let Some((date, time)) = repr.as_ref().split_once(" ") {
-        let date = NaiveDate::parse_from_str(date, "%d.%m.%y")
+        let date = NaiveDate::parse_from_str(date, "%d.%m.%Y")
             .map_err(|err| format!("Could not parse date: {err}"))?;
         let time = NaiveTime::parse_from_str(time, "%H:%M")
             .map_err(|err| format!("Could not parse time: {err}"))?;
@@ -382,10 +452,11 @@ fn main() {
         std::process::exit(1);
     });
 
-    // app.reminders_to_tasks();
+    app.reminders_to_tasks()
+        .unwrap_or_else(|err| eprintln!("ERROR: Could not convert tasks to reminders: {err}"));
 
     match args.action {
-        Action::Show { all, verbose } => {
+        Action::Tasks { all, verbose } => {
             app.show_tasks(all, verbose).unwrap_or_else(|err| {
                 eprintln!("Could not show tasks: {err}");
                 std::process::exit(1);
@@ -402,10 +473,11 @@ fn main() {
                     std::process::exit(1);
                 })
             });
-            app.add_task(title, description, due).unwrap_or_else(|err| {
-                eprintln!("ERROR: could not add task: {err}");
-                std::process::exit(1);
-            });
+            app.add_task(title, description, due, None)
+                .unwrap_or_else(|err| {
+                    eprintln!("ERROR: could not add task: {err}");
+                    std::process::exit(1);
+                });
         }
         Action::DeleteTask { id } => {
             app.delete_task(id).unwrap_or_else(|err| {
@@ -419,7 +491,7 @@ fn main() {
                 std::process::exit(1);
             });
         }
-        Action::Recurring {
+        Action::Reminder {
             title,
             description,
             first_due,
@@ -451,6 +523,12 @@ fn main() {
         Action::Reminders { all, verbose } => {
             app.show_reminders(all, verbose).unwrap_or_else(|err| {
                 eprintln!("Could not show reminders: {err}");
+                std::process::exit(1)
+            });
+        }
+        Action::Stop { id } => {
+            app.stop_reminder(id).unwrap_or_else(|err| {
+                eprintln!("Could not stop reminder: {err}");
                 std::process::exit(1)
             });
         }
@@ -499,7 +577,7 @@ mod test {
         let conn = Connection::open_in_memory().unwrap();
         let mut app = App::try_init(conn).unwrap();
 
-        app.add_task("Test".to_string(), None, None)
+        app.add_task("Test".to_string(), None, None, None)
             .expect("adding task");
 
         app.show_tasks(false, true).unwrap();
