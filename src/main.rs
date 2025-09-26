@@ -1,12 +1,13 @@
-use chrono::{Days, Local, Month, NaiveDate, NaiveTime, TimeDelta};
+use chrono::{Local, NaiveDate, NaiveTime, TimeDelta};
 use clap::{Parser, Subcommand};
-use colored::Colorize;
+use rusqlite::fallible_iterator::FallibleIterator;
 use rusqlite::types::Null;
+
+use rem::{import_datetime, LocalDT, Reminder, Task, DATETIME_FMT};
 
 const DATABASE_FILE: &'static str = "db.sqlite";
 const HOME_DIR: &'static str = "rem";
 const DATABASE_NAME: &'static str = "main";
-const DATETIME_FMT: &'static str = "%d.%m.%Y %H:%M";
 
 #[derive(Clone, PartialEq, Eq, Debug, Subcommand)]
 enum Action {
@@ -154,60 +155,19 @@ impl App {
             .map_err(|err| format!("could not query tasks: {err}"))?;
 
         let rows = res
-            .query_map([], |row| {
-                let id: u64 = row.get("id")?;
-                let title: String = row.get("title")?;
-                let description: Option<String> = row.get("description")?;
-
-                let created = Self::import_datetime(row.get("created")?);
-                let first_due = Self::import_datetime(row.get::<_, i64>("first_due")?);
-                let period =
-                    TimeDelta::new(row.get::<_, i64>("period")?, 0).expect("duration is in bounds");
-
-                let until = row
-                    .get::<_, Option<i64>>("until")?
-                    .map(Self::import_datetime);
-
-                Ok((id, title, description, created, first_due, period, until))
-            })
-            .map_err(|err| format!("Could not query database: {err}"))?;
+            .query([])
+            .map_err(|err| format!("Could not query database: {err}"))?
+            .map(|row| Reminder::from_db_row(row))
+            .iterator();
 
         let now = chrono::Local::now();
 
         for row in rows {
-            let (id, title, description, created, first_due, period, until) = match row {
+            let r = match row {
                 Ok(row) => row,
                 Err(err) => return Err(format!("Error querying database: {err}")),
             };
-
-            let active = until.map(|until| now < until).unwrap_or(true);
-
-            if !all && !active {
-                continue;
-            }
-
-            let marker = if !active { "x" } else { " " };
-            let mut heading = format!("- [{marker}] ({id}) {title}").bold();
-            if !verbose {
-                if !active {
-                    heading = heading.green();
-                }
-            }
-            println!("{heading}");
-            println!("  created:   {}", created.format(DATETIME_FMT));
-            println!("  first due: {}", first_due.format(DATETIME_FMT));
-            if let Some(until) = until {
-                println!("  until:     {}", until.format(DATETIME_FMT));
-            }
-            let mut next_due = first_due;
-            while next_due < now {
-                next_due += period;
-            }
-            println!("  next due:  {}", next_due.format(DATETIME_FMT));
-
-            if let Some(description) = description {
-                println!("  {description}");
-            }
+            print!("{}", r.display(all, verbose, now));
         }
 
         Ok(())
@@ -225,12 +185,6 @@ impl App {
         Ok(())
     }
 
-    fn import_datetime(x: i64) -> LocalDT {
-        chrono::DateTime::from_timestamp(x, 0)
-            .unwrap()
-            .with_timezone(&Local)
-    }
-
     fn show_tasks(&self, all: bool, verbose: bool) -> Result<(), String> {
         let mut res = self
             .conn
@@ -238,69 +192,19 @@ impl App {
             .map_err(|err| format!("could not query tasks: {err}"))?;
 
         let rows = res
-            .query_map([], |row| {
-                let id: u64 = row.get("ID")?;
-                let title: String = row.get("title")?;
-                let description: Option<String> = row.get("description")?;
-
-                let created = Self::import_datetime(row.get("created")?);
-                let due = row.get::<_, Option<i64>>("due")?.map(Self::import_datetime);
-                let completed = row
-                    .get::<_, Option<i64>>("completed")?
-                    .map(Self::import_datetime);
-                Ok((id, title, description, created, due, completed))
-            })
-            .map_err(|err| format!("Could not query database: {err}"))?;
+            .query([])
+            .map_err(|err| format!("Could not query database: {err}"))?
+            .map(|row| Task::from_db_row(row))
+            .iterator();
 
         let now = chrono::Local::now();
 
         for row in rows {
-            let (id, title, description, created, due, completed) = match row {
+            let t = match row {
                 Ok(row) => row,
                 Err(err) => return Err(format!("Error querying database: {err}")),
             };
-
-            if !all && completed.is_some() {
-                continue;
-            }
-
-            let marker = if completed.is_some() { "x" } else { " " };
-            let mut heading = format!("- [{marker}] ({id}) {title}").bold();
-            if !verbose {
-                if completed.is_some() {
-                    heading = heading.bright_green();
-                } else if let Some(due) = due {
-                    if now > due {
-                        heading = heading.bright_red();
-                    }
-                }
-            }
-            println!("{}", heading);
-
-            if !verbose {
-                continue;
-            }
-
-            if let Some(completed) = completed {
-                let text = format!("completed: {}", completed.format(DATETIME_FMT));
-                println!("  {}", text.green());
-            }
-
-            let created = format!("  created:   {}", created.format(DATETIME_FMT));
-            println!("{}", created);
-
-            if let Some(due) = due {
-                let due_repr = format!("  due:       {}", due.format(DATETIME_FMT));
-                if now < due {
-                    println!("{}", due_repr);
-                } else {
-                    println!("{}", due_repr.bright_red());
-                }
-            }
-
-            if let Some(description) = description {
-                println!("  {}", description);
-            }
+            print!("{}", t.display(all, verbose, now));
         }
         Ok(())
     }
@@ -326,7 +230,7 @@ impl App {
                 row.get(0)
             })
             .map_err(|err| format!("Could not get task completion status: {err}"))?;
-        let completed = completed.map(Self::import_datetime);
+        let completed = completed.map(import_datetime);
 
         if let Some(completed) = completed {
             return Err(format!(
@@ -348,8 +252,6 @@ impl App {
         Ok(())
     }
 }
-
-type LocalDT = chrono::DateTime<Local>;
 
 fn get_database_connection() -> Result<rusqlite::Connection, String> {
     let mut path = match std::env::var("XDG_DATA_HOME") {
