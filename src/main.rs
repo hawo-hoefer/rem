@@ -21,7 +21,9 @@ enum Action {
     },
     #[command(about = "Record a bit of work for a task")]
     Record {
+        #[arg(help = "task id to record a work bit for")]
         task_id: u64,
+        #[arg(help = "optional description of the work bit")]
         description: Option<String>,
     },
     #[command(about = "Create a task")]
@@ -32,6 +34,8 @@ enum Action {
         description: Option<String>,
         #[arg(short, long, help = "optional due date/time as DD.MM.YYYY [HH:MM]")]
         due: Option<String>,
+        #[arg(short, long, help = "optional scheduled start as DD.MM.YYYY [HH:MM]")]
+        start: Option<String>,
     },
     #[command(about = "Delete a task")]
     DeleteTask {
@@ -108,6 +112,7 @@ impl App {
                       title TEXT NOT NULL,
                       description TEXT,
                       created INTEGER NOT NULL,
+                      start INTEGER,
                       due INTEGER,
                       generated_by INTEGER,
                       FOREIGN KEY(generated_by) REFERENCES reminders(id),
@@ -140,14 +145,16 @@ impl App {
         &mut self,
         title: String,
         description: Option<String>,
+        start: Option<LocalDT>,
         due: Option<LocalDT>,
         generated_by: Option<u64>,
     ) -> Result<(), String> {
         let _ = self.conn.execute(
-            "INSERT INTO tasks (title, description, created, due, completed, generated_by) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO tasks (title, description, created, start, due, completed, generated_by) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             (
                 title.clone(),
                 description.to_owned(),
+                start.map(|t| t.timestamp()),
                 self.now.timestamp(),
                 due.map(|t| t.timestamp()),
                 Null,
@@ -215,6 +222,7 @@ impl App {
                     self.add_task(
                         reminder.title.clone(),
                         reminder.description.to_owned(),
+                        Some(next_due - reminder.period),
                         Some(next_due),
                         Some(reminder.id),
                     )?;
@@ -236,10 +244,9 @@ impl App {
         until: Option<LocalDT>,
     ) -> Result<(), String> {
         let until = until.map(|x| x.timestamp());
-        let now = Local::now();
         self.conn.execute(
             "INSERT INTO reminders (title, description, first_due, period, until, created) values (?1, ?2, ?3, ?4, ?5, ?6);",
-            (title, description, first_due.timestamp(), period.num_seconds(), until, now.timestamp())
+            (title, description, first_due.timestamp(), period.num_seconds(), until, self.now.timestamp())
         ).map_err(|err| format!("Could not add reminder: {err}"))?;
 
         Ok(())
@@ -318,7 +325,6 @@ impl App {
     }
 
     fn complete_task(&self, id: u64) -> Result<(), String> {
-        let now = Local::now();
         let completed: Option<i64> = self
             .conn
             .query_one("select completed from tasks where id = ?1", (id,), |row| {
@@ -338,7 +344,7 @@ impl App {
             .conn
             .execute(
                 "UPDATE tasks SET completed = ?1 where id = ?2;",
-                (now.timestamp(), id),
+                (self.now.timestamp(), id),
             )
             .map_err(|err| format!("Could not mark task {id} as completed: {err}"))?;
 
@@ -348,13 +354,12 @@ impl App {
     }
 
     fn add_work_bit(&self, task_id: u64, description: Option<String>) -> Result<(), String> {
-        let now = Local::now();
         if let Some(description) = description {
             let res = self
                 .conn
                 .execute(
                     "INSERT INTO work_bits (task_id, datetime, description) values (?1, ?2, ?3);",
-                    (task_id, now.timestamp(), description),
+                    (task_id, self.now.timestamp(), description),
                 )
                 .map_err(|err| err.to_string())?;
             assert_eq!(res, 1);
@@ -363,7 +368,7 @@ impl App {
                 .conn
                 .execute(
                     "INSERT INTO work_bits (task_id, datetime) values (?1, ?2);",
-                    (task_id, now.timestamp()),
+                    (task_id, self.now.timestamp()),
                 )
                 .map_err(|err| err.to_string())?;
             assert_eq!(res, 1);
@@ -514,14 +519,23 @@ fn main() {
             title,
             description,
             due,
+            start,
         } => {
             let due = due.map(parse_date_time).map(|x| {
                 x.unwrap_or_else(|err| {
-                    eprintln!("Could not parse due date: {}", err);
+                    eprintln!("Could not parse due datetime: {}", err);
                     std::process::exit(1);
                 })
             });
-            app.add_task(title, description, due, None)
+
+            let start = start.map(parse_date_time).map(|x| {
+                x.unwrap_or_else(|err| {
+                    eprintln!("Could not parse start datetime: {}", err);
+                    std::process::exit(1);
+                })
+            });
+
+            app.add_task(title, description, start, due, None)
                 .unwrap_or_else(|err| {
                     eprintln!("ERROR: could not add task: {err}");
                     std::process::exit(1);
@@ -634,7 +648,7 @@ mod test {
         let conn = Connection::open_in_memory().unwrap();
         let mut app = App::try_init(conn).unwrap();
 
-        app.add_task("Test".to_string(), None, None, None)
+        app.add_task("Test".to_string(), None, None, None, None)
             .expect("adding task");
 
         app.show_tasks(false, true).unwrap();

@@ -11,5 +11,5 @@ Reminders allow you to create recurring tasks with a certain period.
 - [ ] add support for subtasks
     - when creating a new task, allow optionally specifying a parent task ID
 - [x] record work done on task
-- [ ] add optional beginning of task
+- [x] add optional beginning of task
 - [ ] edit tasks and properties by id 

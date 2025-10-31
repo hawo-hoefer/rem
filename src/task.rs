@@ -12,6 +12,7 @@ pub struct Task {
     pub generated_by: Option<u64>,
 
     pub created: LocalDT,
+    pub start: Option<LocalDT>,
     pub due: Option<LocalDT>,
     pub completed: Option<LocalDT>,
 
@@ -31,6 +32,7 @@ impl Task {
 
         let created = import_datetime(row.get("created")?);
         let due = row.get::<_, Option<i64>>("due")?.map(import_datetime);
+        let start = row.get::<_, Option<i64>>("start")?.map(import_datetime);
         let completed = row.get::<_, Option<i64>>("completed")?.map(import_datetime);
 
         let work_bits = if let Some(conn) = conn_if_work_bits {
@@ -53,6 +55,7 @@ impl Task {
             title,
             description,
             created,
+            start,
             due,
             completed,
             generated_by,
@@ -78,13 +81,16 @@ impl Task {
             title = self.title
         )
         .bold();
-        if !verbose {
-            if self.completed.is_some() {
-                heading = heading.bright_green();
-            } else if let Some(due) = self.due {
-                if now > due {
-                    heading = heading.bright_red();
-                }
+
+        if self.completed.is_some() {
+            heading = heading.bright_green();
+        } else if let Some(due) = self.due {
+            if now > due {
+                heading = heading.bright_red();
+            }
+        } else if let Some(start) = self.start {
+            if now > start {
+                heading = heading.yellow();
             }
         }
         writeln!(f, "{}", heading)?;
@@ -100,6 +106,11 @@ impl Task {
 
         let created = format!("  created:   {}", self.created.format(DATETIME_FMT));
         writeln!(f, "{}", created)?;
+
+        if let Some(start) = self.start {
+            let start_repr = format!("  start:     {}", start.format(DATETIME_FMT));
+            writeln!(f, "{}", start_repr)?;
+        }
 
         if let Some(due) = self.due {
             let due_repr = format!("  due:       {}", due.format(DATETIME_FMT));
