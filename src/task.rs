@@ -1,5 +1,6 @@
 use colored::Colorize;
-use rusqlite::Row;
+use rusqlite::fallible_iterator::FallibleIterator;
+use rusqlite::{Connection, Row};
 
 use crate::{import_datetime, LocalDT, DATETIME_FMT};
 
@@ -13,10 +14,15 @@ pub struct Task {
     pub created: LocalDT,
     pub due: Option<LocalDT>,
     pub completed: Option<LocalDT>,
+
+    pub work_bits: Vec<(LocalDT, Option<String>)>,
 }
 
 impl Task {
-    pub fn from_db_row(row: &Row) -> Result<Self, rusqlite::Error> {
+    pub fn from_db_row(
+        row: &Row,
+        conn_if_work_bits: Option<&Connection>,
+    ) -> Result<Self, rusqlite::Error> {
         let id: u64 = row.get("ID")?;
         let title: String = row.get("title")?;
         let description: Option<String> = row.get("description")?;
@@ -27,6 +33,21 @@ impl Task {
         let due = row.get::<_, Option<i64>>("due")?.map(import_datetime);
         let completed = row.get::<_, Option<i64>>("completed")?.map(import_datetime);
 
+        let work_bits = if let Some(conn) = conn_if_work_bits {
+            conn.prepare(&format!(
+                "SELECT datetime, description from work_bits WHERE task_id = {id}"
+            ))?
+            .query([])?
+            .map(|x| {
+                let datetime = x.get::<_, i64>("date").map(import_datetime)?;
+                let description: Option<String> = x.get("description")?;
+                Ok((datetime, description))
+            })
+            .collect()?
+        } else {
+            Vec::new()
+        };
+
         Ok(Task {
             id,
             title,
@@ -35,6 +56,7 @@ impl Task {
             due,
             completed,
             generated_by,
+            work_bits,
         })
     }
 
@@ -91,6 +113,17 @@ impl Task {
         if let Some(ref description) = self.description {
             writeln!(f, "  {}", description)?;
         }
+
+        if all && self.work_bits.len() > 0 {
+            writeln!(f, "  work bits:")?;
+            for (datetime, desc) in self.work_bits.iter() {
+                write!(f, "  - {}", datetime.format(DATETIME_FMT))?;
+                if let Some(ref desc) = desc {
+                    writeln!(f, ": {}", desc)?;
+                }
+            }
+        }
+
         Ok(())
     }
 

@@ -72,23 +72,6 @@ impl App {
     fn try_init(conn: rusqlite::Connection) -> Result<Self, String> {
         let now = chrono::Local::now();
 
-        if !conn.table_exists(Some(DATABASE_NAME), "tasks").unwrap() {
-            let _ = conn
-                .execute(
-                    "CREATE TABLE IF NOT EXISTS tasks (
-                      id INTEGER PRIMARY KEY,
-                      title TEXT NOT NULL,
-                      description TEXT,
-                      created INTEGER NOT NULL,
-                      due INTEGER,
-                      generated_by INTEGER,
-                      completed INTEGER
-                    );",
-                    [],
-                )
-                .map_err(|err| format!("could not create tasks table: {err}"))?;
-        }
-
         if !conn.table_exists(Some(DATABASE_NAME), "reminders").unwrap() {
             let _ = conn
                 .execute(
@@ -104,6 +87,39 @@ impl App {
                     [],
                 )
                 .map_err(|err| format!("could not create reminders table: {err}"))?;
+        }
+
+        if !conn.table_exists(Some(DATABASE_NAME), "tasks").unwrap() {
+            let _ = conn
+                .execute(
+                    "CREATE TABLE IF NOT EXISTS tasks (
+                      id INTEGER PRIMARY KEY,
+                      title TEXT NOT NULL,
+                      description TEXT,
+                      created INTEGER NOT NULL,
+                      due INTEGER,
+                      generated_by INTEGER,
+                      FOREIGN KEY(generated_by) REFERENCES reminders(id),
+                      completed INTEGER
+                    );",
+                    [],
+                )
+                .map_err(|err| format!("could not create tasks table: {err}"))?;
+        }
+
+        if !conn.table_exists(Some(DATABASE_NAME), "work_bits").unwrap() {
+            let _ = conn
+                .execute(
+                    "CREATE TABLE IF NOT EXISTS work_bits (
+                      id INTEGER PRIMARY KEY,
+                      task_id INTEGER NOT NULL,
+                      FOREIGN KEY(task_id) REFERENCES tasks(id),
+                      datetime INTEGER NOT NULL,
+                      description TEXT
+                    );",
+                    [],
+                )
+                .map_err(|err| format!("could not create work_bits table: {err}"))?;
         }
 
         Ok(Self { conn, now })
@@ -159,7 +175,7 @@ impl App {
                 let mut generated_tasks = r
                     .query([reminder.id])
                     .map_err(|err| format!("Could not query database: {err}"))?
-                    .map(|row| Task::from_db_row(row))
+                    .map(|row| Task::from_db_row(row, None))
                     .collect::<Vec<Task>>()
                     .map_err(|err| {
                         format!("Could not find tasks corresponding to reminder: {err}")
@@ -264,7 +280,7 @@ impl App {
         let rows = res
             .query([])
             .map_err(|err| format!("Could not query database: {err}"))?
-            .map(|row| Task::from_db_row(row))
+            .map(|row| Task::from_db_row(row, Some(&self.conn)))
             .iterator();
 
         for row in rows {
