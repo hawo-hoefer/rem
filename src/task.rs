@@ -39,7 +39,7 @@ impl Task {
             ))?
             .query([])?
             .map(|x| {
-                let datetime = x.get::<_, i64>("date").map(import_datetime)?;
+                let datetime = x.get::<_, i64>("datetime").map(import_datetime)?;
                 let description: Option<String> = x.get("description")?;
                 Ok((datetime, description))
             })
@@ -114,7 +114,7 @@ impl Task {
             writeln!(f, "  {}", description)?;
         }
 
-        if all && self.work_bits.len() > 0 {
+        if verbose && self.work_bits.len() > 0 {
             writeln!(f, "  work bits:")?;
             for (datetime, desc) in self.work_bits.iter() {
                 write!(f, "  - {}", datetime.format(DATETIME_FMT))?;

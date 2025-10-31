@@ -11,7 +11,7 @@ const DATABASE_NAME: &'static str = "main";
 
 #[derive(Clone, PartialEq, Eq, Debug, Subcommand)]
 enum Action {
-    #[command(about = "display tasks")]
+    #[command(about = "Display tasks")]
     Tasks {
         #[arg(short, long, help = "show all tasks, including completed ones")]
         all: bool,
@@ -19,7 +19,12 @@ enum Action {
         #[arg(short, long, help = "show all information on the tasks")]
         verbose: bool,
     },
-    #[command(about = "create a task")]
+    #[command(about = "Record a bit of work for a task")]
+    Record {
+        task_id: u64,
+        description: Option<String>,
+    },
+    #[command(about = "Create a task")]
     Task {
         #[arg(help = "task title")]
         title: String,
@@ -28,11 +33,17 @@ enum Action {
         #[arg(short, long, help = "optional due date/time as DD.MM.YYYY [HH:MM]")]
         due: Option<String>,
     },
-    #[command(about = "delete a task")]
-    DeleteTask { id: u64 },
-    #[command(about = "mark a task as completed")]
-    Complete { id: u64 },
-    #[command(about = "add a generator for recurring events")]
+    #[command(about = "Delete a task")]
+    DeleteTask {
+        #[arg(help = "id of the task to delete")]
+        id: u64,
+    },
+    #[command(about = "Mark a task as completed")]
+    Complete {
+        #[arg(help = "id of the task to mark completed")]
+        id: u64,
+    },
+    #[command(about = "Add a generator for recurring events")]
     Reminder {
         #[arg(help = "title")]
         title: String,
@@ -45,7 +56,7 @@ enum Action {
         #[arg(long, short, help = "last occurrence is before this datetime")]
         until: Option<String>,
     },
-    #[command(about = "display reminders")]
+    #[command(about = "Display reminders")]
     Reminders {
         #[arg(short, long, help = "show all reminders, including inactive ones")]
         all: bool,
@@ -275,7 +286,7 @@ impl App {
         let mut res = self
             .conn
             .prepare("SELECT * FROM tasks;")
-            .map_err(|err| format!("could not query tasks: {err}"))?;
+            .map_err(|err| format!("Could not query tasks: {err}"))?;
 
         let rows = res
             .query([])
@@ -332,6 +343,31 @@ impl App {
             .map_err(|err| format!("Could not mark task {id} as completed: {err}"))?;
 
         assert_eq!(res, 1);
+
+        Ok(())
+    }
+
+    fn add_work_bit(&self, task_id: u64, description: Option<String>) -> Result<(), String> {
+        let now = Local::now();
+        if let Some(description) = description {
+            let res = self
+                .conn
+                .execute(
+                    "INSERT INTO work_bits (task_id, datetime, description) values (?1, ?2, ?3);",
+                    (task_id, now.timestamp(), description),
+                )
+                .map_err(|err| err.to_string())?;
+            assert_eq!(res, 1);
+        } else {
+            let res = self
+                .conn
+                .execute(
+                    "INSERT INTO work_bits (task_id, datetime) values (?1, ?2);",
+                    (task_id, now.timestamp()),
+                )
+                .map_err(|err| err.to_string())?;
+            assert_eq!(res, 1);
+        }
 
         Ok(())
     }
@@ -454,8 +490,6 @@ fn parse_date_time(repr: impl AsRef<str>) -> Result<LocalDT, String> {
 }
 
 fn main() {
-    let args = Args::parse();
-
     let conn = get_database_connection().unwrap_or_else(|err| {
         eprintln!("Could not get database connection: {err}");
         std::process::exit(1);
@@ -469,7 +503,7 @@ fn main() {
     app.reminders_to_tasks()
         .unwrap_or_else(|err| eprintln!("ERROR: Could not convert tasks to reminders: {err}"));
 
-    match args.action {
+    match Args::parse().action {
         Action::Tasks { all, verbose } => {
             app.show_tasks(all, verbose).unwrap_or_else(|err| {
                 eprintln!("Could not show tasks: {err}");
@@ -546,6 +580,15 @@ fn main() {
                 std::process::exit(1)
             });
         }
+        Action::Record {
+            task_id,
+            description,
+        } => app
+            .add_work_bit(task_id, description)
+            .unwrap_or_else(|err| {
+                eprintln!("Could not record work: {err}");
+                std::process::exit(1);
+            }),
     }
 }
 
