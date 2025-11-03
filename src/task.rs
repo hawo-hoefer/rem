@@ -130,8 +130,9 @@ impl Task {
             for (datetime, desc) in self.work_bits.iter() {
                 write!(f, "  - {}", datetime.format(DATETIME_FMT))?;
                 if let Some(ref desc) = desc {
-                    writeln!(f, ": {}", desc)?;
+                    write!(f, ": {}", desc)?;
                 }
+                f.write_str("\n")?;
             }
         }
 
