@@ -1,5 +1,6 @@
 use chrono::{Local, NaiveDate, NaiveTime, TimeDelta};
 use clap::{Parser, Subcommand};
+use rusqlite::config::DbConfig;
 use rusqlite::fallible_iterator::FallibleIterator;
 use rusqlite::types::Null;
 
@@ -115,8 +116,8 @@ impl App {
                       start INTEGER,
                       due INTEGER,
                       generated_by INTEGER,
-                      FOREIGN KEY(generated_by) REFERENCES reminders(id),
-                      completed INTEGER
+                      completed INTEGER,
+                      FOREIGN KEY(generated_by) REFERENCES reminders(id)
                     );",
                     [],
                 )
@@ -129,9 +130,9 @@ impl App {
                     "CREATE TABLE IF NOT EXISTS work_bits (
                       id INTEGER PRIMARY KEY,
                       task_id INTEGER NOT NULL,
-                      FOREIGN KEY(task_id) REFERENCES tasks(id),
                       datetime INTEGER NOT NULL,
-                      description TEXT
+                      description TEXT,
+                      FOREIGN KEY(task_id) REFERENCES tasks(id)
                     );",
                     [],
                 )
@@ -409,8 +410,14 @@ fn get_database_connection() -> Result<rusqlite::Connection, String> {
     path.push(DATABASE_FILE);
 
     // TODO: handle the error properly
-    Ok(rusqlite::Connection::open(path)
-        .map_err(|err| format!("Could not open database connection: {err}"))?)
+    let conn = rusqlite::Connection::open(path)
+        .map_err(|err| format!("Could not open database connection: {err}"))?;
+
+    let ret = conn
+        .set_db_config(DbConfig::SQLITE_DBCONFIG_ENABLE_FKEY, true)
+        .map_err(|err| format!("Could not enable foreign key constraints: {err}"))?;
+
+    Ok(conn)
 }
 
 /// Parse a duration expression with weeks and days
