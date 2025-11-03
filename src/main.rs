@@ -155,8 +155,8 @@ impl App {
             (
                 title.clone(),
                 description.to_owned(),
-                start.map(|t| t.timestamp()),
                 self.now.timestamp(),
+                start.map(|t| t.timestamp()),
                 due.map(|t| t.timestamp()),
                 Null,
                 generated_by,
